@@ -12,17 +12,23 @@ This article first breaks down the structural reasons Puppeteer runs into OOM, t
 
 ## Why Puppeteer runs out of memory
 
-When generating PDFs for large numbers of pages with Puppeteer / Headless Chrome, memory bloat usually comes down to three causes.
+When generating PDFs for large numbers of pages with Puppeteer / Headless Chrome, memory bloat usually comes down to four causes.
 
-### 1. The renderer process heap isn't designed for reuse
+### 1. Rendering thousands of pages as a single giant HTML document, then calling `page.pdf()` once
+
+This is the single most common cause. Instead of generating each report page separately, many implementations concatenate hundreds or thousands of `<div class="page">...</div>` blocks into one massive HTML document and call `page.pdf()` exactly once at the end. Chrome then has to hold the layout and paint results for the *entire* document in memory at once, so memory usage grows worse than linearly with page count.
+
+The effective fix is to avoid rendering all pages in a single request: **split the job into batches of N pages, generate a PDF per batch, and merge them afterward with `pdf-lib` or `qpdf`.** Batching keeps the layout tree Chrome has to hold in memory at any one time bounded.
+
+### 2. The renderer process heap isn't designed for reuse
 
 A Chrome renderer process is fundamentally designed around "open a page, then close it." If you keep calling `page.pdf()` repeatedly on the same `page` object for hundreds of report pages in a row, the V8 heap and DOM tree caches accumulate without being released. Get the timing of `page.close()` / `browser.close()` wrong, and zombie Chrome processes linger around your Node.js process too.
 
-### 2. Fonts and images get reloaded per page
+### 3. Fonts and images get reloaded per page
 
 In HTML/CSS-based rendering, a Japanese font specified via `@font-face` (especially one that isn't subsetted) can get re-parsed on every page transition. If the same font gets re-expanded for every single report page, both memory usage and rendering time degrade proportionally to page count.
 
-### 3. The `page.pdf()` output buffer accumulates in-process
+### 4. The `page.pdf()` output buffer accumulates in-process
 
 When combining many pages into a single PDF, if the implementation holds each page's PDF byte sequence in memory before concatenating, the final PDF size translates directly into the Node.js process's memory footprint.
 
@@ -30,8 +36,9 @@ When combining many pages into a single PDF, if the implementation holds each pa
 
 - Restart the `browser` every N pages and treat the process as disposable
 - Reference OS-installed fonts via `font-family` directly instead of embedding Base64 fonts
-- Isolate generation into worker processes so an OOM doesn't take down the main process (tune `--max-old-space-size` alongside this)
-- Give Docker memory limits enough headroom for Chrome's peak memory (typically 3–5x normal usage)
+- Isolate generation into worker processes so an OOM doesn't take down the main process
+- `--max-old-space-size` only tunes the Node.js (V8) heap limit — it has no effect on the Chrome renderer process's memory. If you need to control renderer memory, rely on page batching (above) or periodic `browser` restarts instead
+- Size Docker memory limits based on peak memory you've actually measured for your real reports (max expected page/image count), with enough margin. There's no generic "3–5x" rule — the multiplier depends entirely on the content
 
 These are workarounds, though — they don't address the root cause, which is repurposing a browser engine for report rendering in the first place. If your report volume and page counts are only going to grow, it's worth considering a different architecture.
 
@@ -57,6 +64,8 @@ The result: the PDF output library (Skia's `SkPDF`) ended up embedding a separat
 | Generation time | ~28s | ~2.5s |
 
 The fix was simple: build the font once outside the page loop, and pass a reference into `draw_watermark()` instead of rebuilding it (applying the same pattern already used for `font_cache`).
+
+Note that these numbers are a before/after comparison within ACR itself, not a head-to-head benchmark against Puppeteer on the same report. To back up this article's central claim about Puppeteer's OOM problem with equally strong evidence, what's still needed is a direct benchmark — generating the same report in both Puppeteer and ACR and comparing memory usage and generation time side by side.
 
 What this case illustrates is a general principle: in any code generating large numbers of report pages, be suspicious of "whatever we're doing for every single page." Whether in Puppeteer or ACR, most OOM and bloat issues trace back to this pattern — initialization that should happen once, but is instead repeated inside the loop.
 

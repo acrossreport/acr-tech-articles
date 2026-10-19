@@ -5,28 +5,20 @@
 .NET Framework 時代の業務システムで帳票出力に ActiveReports（GrapeCity / MESCIUS）を使っているプロジェクトは今も多くあります。長年運用されてきた分、現場には次のような悩みが溜まりがちです。
 
 1. **ライセンス更新費が年々重くのしかかる** — サーバーライセンスやランタイムライセンスの更新費用が、帳票機能単体の価値に見合わなくなってきている
-2. **Windows / .NET Framework に縛られている** — ActiveReports 自体や、それをホストする Web アプリが .NET Framework 前提で、Linux コンテナやクラウドネイティブな構成に乗せ替えられない
+2. **Windows / .NET Framework に縛られている** — ActiveReports 自体は近年のバージョンで .NET 6 以降や Linux にも対応していますが、長年運用されてきたプロジェクトでは ActiveReports を呼び出す Web アプリ本体が .NET Framework のまま据え置かれているケースが多く、帳票だけでなくアプリ全体が Linux コンテナやクラウドネイティブな構成に乗せ替えられずにいる
 3. **デザイナー資産（帳票レイアウト）が何十〜何百種類もある** — 今さら全部作り直すのは現実的ではなく、「資産を活かしたまま」が絶対条件になる
 
 この3つが同時に来ると、「全面リプレイス」も「現状維持」もどちらも選びにくく、プロジェクトが膠着しがちです。
 
 ## 移行のアプローチ: 「置き換え」ではなく「意味的互換」を狙う
 
-ActiveReports のレイアウトファイル（.rdlx など）をそのままバイナリ互換で読み込む、というアプローチは現実的ではありません。フォーマットの再現性を完全に保証するコストが高すぎるからです。
+ActiveReports のレイアウトファイル（.rdlx や .rpx など）は中身自体は XML ですが、これをそのまま「完全互換」で読み込んで 1 ドットも違わずに再現する、というアプローチは現実的ではありません。XML スキーマを読めること自体にはあまり価値がなく、ActiveReports のレンダリングエンジンが内部で行っているレイアウト計算・改ページ判定・書式解決までを完全に再現するコストが高すぎるからです。
 
 そこで筆者が開発している ACR（Across Report）では、**ActiveReports の「概念・振る舞い」を JSON テンプレートのレベルで再現する**という方針を取っています。具体的には以下のような互換性を実装レベルで持たせています。
 
 ### セクション構造の互換
 
-ActiveReports の `Detail` / `PageHeader` / `PageFooter` などのセクション概念をそのまま継承し、セクションごとの `NewPage AFTER`（セクション出力後に改ページする）といった制御も同じ意味で再現しています。
-
-```rust
-// acr_core/src/layout/engine.rs
-// ② ActiveReports互換：NewPage AFTER
-if sec.new_page_after {
-    ...
-}
-```
+ActiveReports のページレポート（.rpx）が持つ `Detail` / `PageHeader` / `PageFooter` などのセクション概念をそのまま継承し、セクションごとの `NewPage AFTER`（セクション出力後に改ページする）といった制御も同じ意味で再現しています。
 
 ### 日付書式・フォント指定の互換
 
@@ -43,21 +35,21 @@ ActiveReports 独自のバーコード種別コード（例: 旧コード `18`�
 ACR は Rust + Google Skia で実装されたネイティブレンダラーで、.NET Framework にも Windows API にも依存しません。
 
 - レンダリングエンジン本体（`acr_core` / `acr_renderer_skia`）は Windows / macOS / Linux で同一のバイナリ構成でビルド可能
-- Linux では日本語フォント（VL Gothic 等）を `apt install fonts-vlgothic` で用意するだけで、Windows と同一の出力が得られる
-- 既存の .NET / C# 資産からは FFI 経由（`axr_layout.dll` / `libaxr_layout.so`）で呼び出せるため、呼び出し側のコードをいきなり全部書き換える必要がない
+- Linux では日本語フォント（VL Gothic 等）を `apt install fonts-vlgothic` で用意することで帳票を出力できますが、MS 明朝・MS ゴシックとは文字送り幅やグリフの形状が微妙に異なるため、Windows とピクセル単位で同一の出力にはなりません。移行作業で最もハマりやすいのがこの点で、罫線・表組みの位置ズレや折り返し崩れが起きていないか、後述の「並行稼働での検証」で帳票ごとに目視確認することが欠かせません
+- 既存の .NET / C# 資産からは FFI 経由（`axr_runtime.dll` / `libaxr_runtime.so`）で呼び出せるため、呼び出し側のコードをいきなり全部書き換える必要がない
 
 ```c
-// FFI インターフェース（axr_layout.dll / libaxr_layout.so 共通）
-char* render_html(const char* template_json, const char* data_json);
-void free_string(char* ptr);
+// FFI インターフェース（axr_runtime.dll / libaxr_runtime.so 共通）
+unsigned char* acr_render_pdf(const char* template_json, const char* data_json, int* out_len);
+void acr_free_buffer(unsigned char* ptr, int len);
 ```
 
 つまり移行は「C# アプリを捨てる」のではなく、「帳票レンダリング部分だけを Rust/Skia 製の軽量エンジンに差し替え、呼び出し側は FFI 経由でそのまま使う」という段階的な置き換えが可能です。Windows でも Linux でも同じ FFI インターフェースで動くため、最終的に Web アプリ本体を Linux コンテナへ移す際も、帳票部分だけ先行して検証・切り替えができます。
 
 ## 典型的な移行ステップ
 
-1. **棚卸し**: 既存 ActiveReports テンプレートの一覧化。セクション構成・バーコード種別・特殊書式（割賦・ルビ・縦書き等）の有無を確認
-2. **JSON テンプレート化**: 優先度の高い帳票から、ActiveReports の定義を ACR の JSON テンプレートへ変換（セクション・フィールド単位の機械的な変換が中心になるケースが多い）
+1. **棚卸し**: 既存 ActiveReports テンプレートの一覧化。セクション構成・バーコード種別・特殊書式（割付＝均等割付・ルビ・縦書き等）の有無を確認
+2. **JSON テンプレート化**: 優先度の高い帳票から、ActiveReports の定義を ACR の JSON テンプレートへ変換（セクション・フィールド単位の変換が中心で、現状は自動変換ツールではなく手作業がベースになります）
 3. **並行稼働での検証**: 既存の ActiveReports 出力と ACR 出力を同一データで突き合わせ、WYSIWYG プレビューで差分を目視・自動比較
 4. **呼び出し側の切り替え**: C# 側は FFI 呼び出しに差し替えるだけで済むため、Web フロント・業務ロジックには手を入れない
 5. **Linux 化**: 検証が済んだ帳票から順に、レンダリング部分を Linux コンテナへ移設

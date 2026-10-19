@@ -12,7 +12,7 @@ This article walks through that setup using ACR (Across Report), a Rust-based re
 ┌─────────────────────────┐
 │   C# app  /  Node.js app │
 └───────────┬─────────────┘
-            │ FFI (axr_layout.so)  /  N-API (acr_node_native.so)
+            │ FFI (libaxr_runtime.so)  /  N-API (acr_node_native.node)
 ┌───────────▼─────────────┐
 │    Docker container (Linux) │
 │  ├ acr_core              │ ← JSON template → RenderCommand
@@ -23,7 +23,7 @@ This article walks through that setup using ACR (Across Report), a Rust-based re
 
 What you bundle into the container depends slightly on the calling language:
 
-- **From C#**: call `libaxr_layout.so` via P/Invoke (the same FFI interface as Windows' `axr_layout.dll`)
+- **From C#**: call `libaxr_runtime.so` via P/Invoke (the same FFI interface as Windows' `axr_runtime.dll`)
 - **From Node.js**: `require` the `acr_node_native` native addon (built with napi-rs) directly
 
 Either path ultimately generates the PDF/PNG through the same underlying Rust binary.
@@ -37,6 +37,8 @@ cargo build --release
 ```
 
 This builds every crate, including `acr_core` / `acr_renderer_skia`, for Linux. None of the Windows-ARM64-specific workarounds apply here — `skia-safe`'s prebuilt binaries just work on Linux x86_64.
+
+The examples below assume Rust 1.82+ and Node.js 22 (LTS). Node 20 reached end-of-life in April 2026, so use `node:22-bookworm-slim` or later for any new setup.
 
 ### 2. Calling from Node.js (napi-rs)
 
@@ -65,41 +67,74 @@ cargo build --release -p acr_node_native
 
 Baking this manual copy step directly into your `Dockerfile`'s multi-stage build avoids this trap.
 
+One detail to watch: the copy's destination filename. The `index.js` napi-rs generates doesn't look for a fixed `index.node` — it does `require('./index.linux-x64-gnu.node')` (or `index.linux-x64-musl.node` on musl-based images), i.e. it looks for a **platform-triple-qualified filename**. If you build and run on a glibc-based `node:slim` image, you need to copy the binary in as `index.linux-x64-gnu.node`.
+
 ### 3. Example Dockerfile (Node.js consumer)
 
 ```dockerfile
 # ---- build stage ----
-FROM rust:1.78-bookworm AS builder
+FROM rust:1.82-bookworm AS builder
 WORKDIR /app
 COPY . .
 RUN cargo build --release -p acr_node_native
 
 # ---- runtime stage ----
-FROM node:20-bookworm-slim
+FROM node:22-bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
         fonts-vlgothic \
+        libfontconfig1 \
+        libfreetype6 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=builder /app/target/release/libacr_node_native.so ./index.node
+COPY --from=builder /app/target/release/libacr_node_native.so ./index.linux-x64-gnu.node
 COPY acr_node_native/index.js acr_node_native/index.d.ts ./
 COPY acr_node_native/package.json ./
 
-# COPY your app code here, and call it via require('./index.node')
+# COPY your app code here, and call it via require('./index.js')
 ```
 
-Two things matter here:
+Three things matter here:
 
 - **Separate the build stage from the runtime stage** so the final image doesn't carry the Rust toolchain, keeping it lean
 - **Only install Japanese fonts in the runtime stage** (`apt install fonts-vlgothic`) — the build stage doesn't need them
+- **`skia-safe` needs `libfontconfig1` / `libfreetype6` at runtime.** These aren't included by default in `node:*-slim` images, so install them explicitly
 
 ### 4. Calling from C#
 
-If your C# app is already on .NET (Core) and cross-platform-ready, referencing `libaxr_layout.so` via P/Invoke just works on Linux, with the exact same calling code as on Windows.
+If your C# app is already on .NET (Core) and cross-platform-ready, referencing `libaxr_runtime.so` via P/Invoke just works on Linux, with the exact same calling code as on Windows. The buffer the native side returns isn't managed by the .NET GC, so you must explicitly free it once you're done with it.
 
-```c
-char* render_html(const char* template_json, const char* data_json);
-void free_string(char* ptr);
+```csharp
+using System;
+using System.Runtime.InteropServices;
+
+internal static class AcrNative
+{
+    // Resolves to libaxr_runtime.so on Linux, axr_runtime.dll on Windows
+    [DllImport("axr_runtime", CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr acr_render_pdf(
+        string templateJson, string dataJson, out int outLen);
+
+    [DllImport("axr_runtime", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void acr_free_buffer(IntPtr ptr, int len);
+
+    public static byte[] RenderPdf(string templateJson, string dataJson)
+    {
+        IntPtr ptr = acr_render_pdf(templateJson, dataJson, out int len);
+        if (ptr == IntPtr.Zero) throw new InvalidOperationException("ACR render failed");
+
+        try
+        {
+            var buffer = new byte[len];
+            Marshal.Copy(ptr, buffer, 0, len);
+            return buffer;
+        }
+        finally
+        {
+            acr_free_buffer(ptr, len); // always free buffers allocated on the Rust side
+        }
+    }
+}
 ```
 
 If you're still on .NET Framework, migrating to .NET (Core) / .NET 8+ is a prerequisite — but since the report-rendering call interface is identical to the Windows version, you can "Linux-ify and validate the report engine first, and tackle the rest of the app's .NET migration separately, later."
@@ -111,6 +146,8 @@ Compared to Chrome-based PDF generation (Puppeteer, etc.), this architecture win
 - No need to ship a full Chromium install (hundreds of MB) in the runtime image
 - No "renderer process" concept means none of the process-management/memory-monitoring complexity that scales with page count
 - A single self-contained Rust binary means faster container startup and shorter cold starts under autoscaling
+
+> **TODO (fill in before publishing)**: Don't leave "lighter" and "blazing-fast" as qualitative claims — back them with real measurements (runtime image size, container cold-start time, pages generated per second, compared against the Puppeteer setup). A title that says "blazing-fast" without numbers to back it up undercuts the article's credibility as a technical piece.
 
 ## Summary
 

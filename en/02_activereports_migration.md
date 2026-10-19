@@ -5,28 +5,20 @@
 Plenty of .NET Framework-era business systems still rely on ActiveReports (GrapeCity / MESCIUS) for report output. After years of running in production, these setups tend to accumulate the same three frustrations:
 
 1. **License renewal costs keep growing** — server and runtime license renewal fees no longer feel proportionate to the value the reporting feature alone provides
-2. **Locked into Windows / .NET Framework** — ActiveReports itself, and the web app hosting it, assume .NET Framework, blocking a move to Linux containers or a cloud-native setup
+2. **Locked into Windows / .NET Framework** — recent ActiveReports versions do support .NET 6+ and Linux, but in long-running projects it's typically the web app *hosting* ActiveReports that's still stuck on .NET Framework, which keeps the whole app — not just the report engine — off Linux containers and cloud-native setups
 3. **Dozens or hundreds of designer assets (report layouts) already exist** — rebuilding them all from scratch isn't realistic; "keep the existing assets" is a hard requirement
 
 When all three show up together, neither "full replacement" nor "do nothing" is an easy choice, and projects tend to stall.
 
 ## The migration approach: aim for "semantic compatibility," not "replacement"
 
-Reading ActiveReports layout files (.rdlx etc.) with full binary compatibility isn't realistic — guaranteeing exact format fidelity is too costly.
+ActiveReports layout files (.rdlx, .rpx, etc.) are XML under the hood, but reading them with "full compatibility" — reproducing output down to the pixel — isn't realistic. Parsing the XML schema itself has little value; the real cost is reproducing everything ActiveReports' rendering engine does internally: layout calculation, page-break decisions, and format resolution.
 
 Instead, ACR (Across Report), which I develop, takes the approach of **reproducing ActiveReports' concepts and behavior at the JSON template level**. Concretely, this means baking in the following compatibility at the implementation level:
 
 ### Section structure compatibility
 
-ACR inherits ActiveReports' `Detail` / `PageHeader` / `PageFooter` section concepts directly, including per-section controls like `NewPage AFTER` (force a page break after a section outputs), reproduced with the same meaning.
-
-```rust
-// acr_core/src/layout/engine.rs
-// ② ActiveReports-compatible: NewPage AFTER
-if sec.new_page_after {
-    ...
-}
-```
+ACR inherits the `Detail` / `PageHeader` / `PageFooter` section concepts from ActiveReports' page reports (`.rpx`) directly, including per-section controls like `NewPage AFTER` (force a page break after a section outputs), reproduced with the same meaning.
 
 ### Date format and font specification compatibility
 
@@ -43,21 +35,21 @@ None of this aims for pixel-perfect, zero-deviation reproduction. The goal is **
 ACR is a native renderer implemented in Rust + Google Skia, with no dependency on .NET Framework or the Windows API.
 
 - The rendering engine itself (`acr_core` / `acr_renderer_skia`) builds as the same binary structure on Windows, macOS, and Linux
-- On Linux, installing Japanese fonts (VL Gothic, etc.) is as simple as `apt install fonts-vlgothic`, producing output identical to Windows
-- Existing .NET / C# assets can call in via FFI (`axr_layout.dll` / `libaxr_layout.so`), so you don't need to rewrite the calling code all at once
+- On Linux, installing Japanese fonts (VL Gothic, etc.) via `apt install fonts-vlgothic` gets you working report output, but VL Gothic's character widths and glyph shapes differ subtly from MS Mincho / MS Gothic, so the result isn't pixel-identical to Windows. This is the single most common place migrations get stuck — don't skip the per-report visual check described under "Validate with parallel operation" below; watch specifically for shifted rule lines, table borders, and line-wrap differences
+- Existing .NET / C# assets can call in via FFI (`axr_runtime.dll` / `libaxr_runtime.so`), so you don't need to rewrite the calling code all at once
 
 ```c
-// FFI interface (shared between axr_layout.dll and libaxr_layout.so)
-char* render_html(const char* template_json, const char* data_json);
-void free_string(char* ptr);
+// FFI interface (shared between axr_runtime.dll and libaxr_runtime.so)
+unsigned char* acr_render_pdf(const char* template_json, const char* data_json, int* out_len);
+void acr_free_buffer(unsigned char* ptr, int len);
 ```
 
 In other words, this isn't "throw away the C# app" — it's "swap out just the report-rendering layer for a lightweight Rust/Skia engine, while the calling side keeps using it via FFI, unchanged." Since the same FFI interface works on both Windows and Linux, once you eventually move the main web app into a Linux container, the report portion can be validated and switched over ahead of time, independently.
 
 ## A typical migration path
 
-1. **Inventory**: enumerate existing ActiveReports templates. Check section structure, barcode types, and any special formatting (installment pricing, ruby annotations, vertical text, etc.)
-2. **Convert to JSON templates**: starting with the highest-priority reports, convert ActiveReports definitions into ACR's JSON template format (usually a fairly mechanical section-by-section, field-by-field conversion)
+1. **Inventory**: enumerate existing ActiveReports templates. Check section structure, barcode types, and any special formatting (justified/equal-width spacing, ruby annotations, vertical text, etc.)
+2. **Convert to JSON templates**: starting with the highest-priority reports, convert ActiveReports definitions into ACR's JSON template format (section-by-section, field-by-field; currently this is a manual process rather than an automated converter tool)
 3. **Validate with parallel operation**: run the same data through both the existing ActiveReports output and the new ACR output, then compare visually via the WYSIWYG preview and/or automated diffing
 4. **Swap the calling side**: on the C# side, this is just a switch to the FFI call — the web frontend and business logic stay untouched
 5. **Move to Linux**: once a report has been validated, move its rendering piece into a Linux container
