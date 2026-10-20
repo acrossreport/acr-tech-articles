@@ -18,7 +18,7 @@ ActiveReports のレイアウトファイル（.rdlx や .rpx など）は中身
 
 ### セクション構造の互換
 
-ActiveReports のページレポート（.rpx）が持つ `Detail` / `PageHeader` / `PageFooter` などのセクション概念をそのまま継承し、セクションごとの `NewPage AFTER`（セクション出力後に改ページする）といった制御も同じ意味で再現しています。
+ActiveReports のセクションレポート（.rpx）が持つ `Detail` / `PageHeader` / `PageFooter` などのセクション概念をそのまま継承し、セクションごとの `NewPage AFTER`（セクション出力後に改ページする）といった制御も同じ意味で再現しています。
 
 ### 日付書式・フォント指定の互換
 

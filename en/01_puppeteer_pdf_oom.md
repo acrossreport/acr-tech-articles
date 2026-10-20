@@ -6,7 +6,7 @@ Many teams generate invoices, delivery slips, and other business documents as PD
 
 - Memory balloons and the process gets OOM-killed once page counts reach the hundreds or thousands
 - Docker container memory limits (512MB–1GB) get hit almost immediately
-- Per-page generation time stays reasonable, but total time degrades worse than linearly
+- Per-page generation time stays reasonable, but total time balloons as page count grows
 
 This article first breaks down the structural reasons Puppeteer runs into OOM, then introduces an alternative: skipping the browser engine entirely. I'll walk through a real example from ACR (Across Report), a report engine I develop in Rust.
 
@@ -16,9 +16,9 @@ When generating PDFs for large numbers of pages with Puppeteer / Headless Chrome
 
 ### 1. Rendering thousands of pages as a single giant HTML document, then calling `page.pdf()` once
 
-This is the single most common cause. Instead of generating each report page separately, many implementations concatenate hundreds or thousands of `<div class="page">...</div>` blocks into one massive HTML document and call `page.pdf()` exactly once at the end. Chrome then has to hold the layout and paint results for the *entire* document in memory at once, so memory usage grows worse than linearly with page count.
+This is the single most common cause. Instead of generating each report page separately, many implementations concatenate hundreds or thousands of `<div class="page">...</div>` blocks into one massive HTML document and call `page.pdf()` exactly once at the end. Chrome then has to hold the layout and paint results for the *entire* document in memory at once, so memory usage grows with page count.
 
-The effective fix is to avoid rendering all pages in a single request: **split the job into batches of N pages, generate a PDF per batch, and merge them afterward with `pdf-lib` or `qpdf`.** Batching keeps the layout tree Chrome has to hold in memory at any one time bounded.
+The effective fix is to avoid rendering all pages in a single request: **split the job into batches of N pages, generate a PDF per batch, and merge them afterward.** Batching keeps the layout tree Chrome has to hold in memory at any one time bounded. You can merge with `pdf-lib` or `qpdf`, but `pdf-lib` loads every PDF being merged into the Node.js process's memory before processing, so with a large number of batches or large per-batch files it can reintroduce the same kind of memory buildup described in cause #4 below. `qpdf`, which runs as an external process and can stream, is the safer choice for merging at scale.
 
 ### 2. The renderer process heap isn't designed for reuse
 

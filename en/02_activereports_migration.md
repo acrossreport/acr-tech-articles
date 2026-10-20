@@ -18,7 +18,7 @@ Instead, ACR (Across Report), which I develop, takes the approach of **reproduci
 
 ### Section structure compatibility
 
-ACR inherits the `Detail` / `PageHeader` / `PageFooter` section concepts from ActiveReports' page reports (`.rpx`) directly, including per-section controls like `NewPage AFTER` (force a page break after a section outputs), reproduced with the same meaning.
+ACR inherits the `Detail` / `PageHeader` / `PageFooter` section concepts from ActiveReports' section reports (`.rpx`) directly, including per-section controls like `NewPage AFTER` (force a page break after a section outputs), reproduced with the same meaning.
 
 ### Date format and font specification compatibility
 

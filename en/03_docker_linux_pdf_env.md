@@ -12,7 +12,7 @@ This article walks through that setup using ACR (Across Report), a Rust-based re
 ┌─────────────────────────┐
 │   C# app  /  Node.js app │
 └───────────┬─────────────┘
-            │ FFI (libaxr_runtime.so)  /  N-API (acr_node_native.node)
+            │ FFI (libaxr_runtime.so)  /  N-API (index.linux-x64-gnu.node)
 ┌───────────▼─────────────┐
 │    Docker container (Linux) │
 │  ├ acr_core              │ ← JSON template → RenderCommand
@@ -104,6 +104,8 @@ Three things matter here:
 
 If your C# app is already on .NET (Core) and cross-platform-ready, referencing `libaxr_runtime.so` via P/Invoke just works on Linux, with the exact same calling code as on Windows. The buffer the native side returns isn't managed by the .NET GC, so you must explicitly free it once you're done with it.
 
+One more thing to watch: string marshaling. If a `string` parameter has no `CharSet` or `MarshalAs` specified, Windows marshals it as ANSI by default (Shift-JIS on a Japanese-locale machine) before handing it to the native side. The Rust side expects UTF-8 (it reads the buffer as a `CStr`), so without explicit marshaling, Japanese text inside your JSON can get mangled or fail to parse. Add `[MarshalAs(UnmanagedType.LPUTF8Str)]` to marshal explicitly as UTF-8 (on .NET 7+, `LibraryImport` with `StringMarshalling.Utf8` solves the same problem).
+
 ```csharp
 using System;
 using System.Runtime.InteropServices;
@@ -113,7 +115,9 @@ internal static class AcrNative
     // Resolves to libaxr_runtime.so on Linux, axr_runtime.dll on Windows
     [DllImport("axr_runtime", CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr acr_render_pdf(
-        string templateJson, string dataJson, out int outLen);
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string templateJson,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string dataJson,
+        out int outLen);
 
     [DllImport("axr_runtime", CallingConvention = CallingConvention.Cdecl)]
     private static extern void acr_free_buffer(IntPtr ptr, int len);

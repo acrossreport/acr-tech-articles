@@ -12,7 +12,7 @@
 ┌─────────────────────────┐
 │ C# アプリ / Node.js アプリ │
 └───────────┬─────────────┘
-            │ FFI (libaxr_runtime.so)  /  N-API (acr_node_native.node)
+            │ FFI (libaxr_runtime.so)  /  N-API (index.linux-x64-gnu.node)
 ┌───────────▼─────────────┐
 │  Docker コンテナ (Linux)  │
 │  ├ acr_core              │ ← JSON テンプレート → RenderCommand
@@ -104,6 +104,8 @@ COPY acr_node_native/package.json ./
 
 C# アプリ自体が .NET (Core) でクロスプラットフォーム対応済みであれば、`libaxr_runtime.so` を P/Invoke で参照するだけで Linux 上でも同じ呼び出しコードが動きます。ネイティブ側が返すバッファはマネージドのガベージコレクション対象外なので、使い終わったら必ず解放用の関数を呼ぶ必要があります。
 
+もう一点、文字列引数のマーシャリングにも注意が必要です。`string` 引数に `CharSet` や `MarshalAs` を何も指定しない場合、Windows では既定で ANSI（日本語環境では Shift-JIS）に変換されてネイティブ側へ渡されます。Rust 側は UTF-8 前提で `CStr` を解釈するため、このままだと JSON 内の日本語が文字化けしたり、パースに失敗したりします。`[MarshalAs(UnmanagedType.LPUTF8Str)]` を指定して明示的に UTF-8 でマーシャリングしてください（.NET 7 以降なら `LibraryImport` + `StringMarshalling.Utf8` でも同様に解決できます）。
+
 ```csharp
 using System;
 using System.Runtime.InteropServices;
@@ -113,7 +115,9 @@ internal static class AcrNative
     // Linux では libaxr_runtime.so、Windows では axr_runtime.dll を解決する
     [DllImport("axr_runtime", CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr acr_render_pdf(
-        string templateJson, string dataJson, out int outLen);
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string templateJson,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string dataJson,
+        out int outLen);
 
     [DllImport("axr_runtime", CallingConvention = CallingConvention.Cdecl)]
     private static extern void acr_free_buffer(IntPtr ptr, int len);
